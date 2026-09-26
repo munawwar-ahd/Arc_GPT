@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(50%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-indeterminate {
+  animation: indeterminate 1.5s infinite ease-in-out;
+}
+
+/* Glassmorphism and sleek borders */
+.shadow-xs {
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.shadow-2xs {
+  box-shadow: 0 1px 1px 0 rgb(0 0 0 / 0.03);
+}
