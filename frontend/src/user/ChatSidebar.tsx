@@ -295,7 +295,7 @@ export function SidebarRailMark({ onOpen }: { onOpen: () => void }) {
       aria-label="Open chat history"
       title="Chat history"
     >
-      <img src="/brand/arcgpt-mark-gold.png" alt="" width={22} height={22} />
+      <img src={`${import.meta.env.BASE_URL}brand/arcgpt-mark-gold.png`} alt="" width={22} height={22} />
     </button>
   );
 }

@@ -108,9 +108,13 @@ export class DatabaseService {
   public async initialize(): Promise<void> {
     const connected = await checkPostgresConnection();
     if (connected) {
-      console.log(`[DB INIT] PostgreSQL connected to database ${process.env.DB_NAME || 'arcgpt_institution'}.`);
+      console.log(`[DB INIT] PostgreSQL connected to database ${process.env.DB_NAME || 'arcgpt_new'}.`);
       try {
-        await query(`ALTER TABLE public.arcgpt_users ADD COLUMN IF NOT EXISTS phone TEXT;`);
+        // NOTE: no DDL here. The schema, including arcgpt_users.phone, is
+        // created by database/01_control_tables.sql. Running ALTER TABLE at
+        // startup would require the application to own its tables, which
+        // conflicts with keeping the schema owned by the migration role. The
+        // statements below are idempotent DML the app is explicitly granted.
         await query(`
           INSERT INTO public.permissions (permission_name, description) VALUES
             ('users.view', 'View institution users'),
@@ -377,15 +381,14 @@ export class DatabaseService {
          (SELECT COUNT(*)::int FROM public.students) AS student_count,
          (SELECT ROUND(AVG(current_cgpa), 2) FROM public.student_academic_summary) AS average_cgpa,
          (SELECT COUNT(*)::int
-            FROM public.students s
-            JOIN public.attendance a ON a.student_id = s.student_id
-           WHERE UPPER(a.status) = 'ABSENT') AS absent_records`
+            FROM public.v_student_attendance_summary
+           WHERE attendance_percentage < 75) AS low_attendance_students`
     );
     const row = result.rows[0] || {};
     return [
       { id: 'students', subtitle: 'Institution', badge: String(row.student_count ?? 0), badgeColor: 'bg-blue-100 text-blue-800 border-blue-200', title: 'Enrolled students', statValue: row.student_count ?? 0, statSubtext: 'students', explanation: 'Counted from the local students table.', query: 'How many students are there?' },
       { id: 'cgpa', subtitle: 'Academic', badge: 'CGPA', badgeColor: 'bg-emerald-100 text-emerald-800 border-emerald-200', title: 'Average CGPA', statValue: row.average_cgpa ?? '—', statSubtext: 'current average', explanation: 'Calculated from local student academic summaries.', query: 'What is the average CGPA of each department?' },
-      { id: 'attendance', subtitle: 'Attendance', badge: 'ABSENT', badgeColor: 'bg-amber-100 text-amber-800 border-amber-200', title: 'Attendance records', statValue: row.absent_records ?? 0, statSubtext: 'ABSENT records', explanation: 'Counted from individual local attendance records.', query: 'Which AIML students have attendance below 75%?' },
+      { id: 'attendance', subtitle: 'Attendance', badge: 'LOW', badgeColor: 'bg-amber-100 text-amber-800 border-amber-200', title: 'Below 75% attendance', statValue: row.low_attendance_students ?? 0, statSubtext: 'students', explanation: 'Counted from per-student attendance roll-ups.', query: 'Which AIML students have attendance below 75%?' },
     ];
   }
 
@@ -488,7 +491,7 @@ export class DatabaseService {
     if (!isConnected) {
       return {
         status: 'Disconnected',
-        database: process.env.DB_NAME || 'arcgpt_institution',
+        database: process.env.DB_NAME || 'arcgpt_new',
         host: process.env.DB_HOST || 'localhost',
         port: Number(process.env.DB_PORT || 5432),
         studentCount: 0,
@@ -509,7 +512,7 @@ export class DatabaseService {
     const latencyMs = Date.now() - start;
     return {
       status: 'Connected',
-      database: process.env.DB_NAME || 'arcgpt_institution',
+      database: process.env.DB_NAME || 'arcgpt_new',
       host: process.env.DB_HOST || 'localhost',
       port: Number(process.env.DB_PORT || 5432),
       studentCount: students,

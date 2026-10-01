@@ -22,7 +22,7 @@
  *    here keeps that detail out of the components.
  */
 
-const RAW_BASE_URL = (import.meta.env?.VITE_BACKEND_URL as string | undefined) ?? '';
+const RAW_BASE_URL = __ARCGPT_BACKEND_URL__;
 
 /** Trailing slashes are stripped so joining never produces `//api/...`. */
 export const API_BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');

@@ -12,7 +12,12 @@ import { sqlGenerationService } from './src/server/sql-generation.service.js';
 import { authService } from './src/server/auth.service.js';
 import { auditService } from './src/server/audit.service.js';
 import { checkOllamaStatus, OLLAMA_MODEL } from './src/server/ai.js';
-import { checkPostgresConnection } from './src/server/db.js';
+import {
+  DEFAULT_PROVIDER_ID,
+  listAvailableModels,
+  resolveModelSelection,
+} from './src/server/llm/index.js';
+import { checkPostgresConnection, assertArcgptDatabase } from './src/server/db.js';
 import { departmentService } from './src/server/department.service.js';
 import { studentService } from './src/server/student.service.js';
 import { importService, ImportTableName } from './src/server/import.service.js';
@@ -148,14 +153,18 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
 function setSessionCookie(res: Response, token: string): void {
   res.cookie(sessionCookieName, token, {
     httpOnly: true,
-    secure: isProduction,
-    sameSite: 'strict',
+    secure: true,
+    sameSite: 'none',
     maxAge: sessionMaxAgeMs,
     path: '/',
   });
 }
 
 async function startServer(): Promise<void> {
+  // Before anything opens a connection or runs a statement: this process must
+  // never be pointed at another project's database.
+  assertArcgptDatabase();
+
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -224,7 +233,7 @@ async function startServer(): Promise<void> {
     try {
       if (typeof token === 'string') await authService.logout(token);
     } finally {
-      res.clearCookie(sessionCookieName, { httpOnly: true, secure: isProduction, sameSite: 'strict', path: '/' });
+      res.clearCookie(sessionCookieName, { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
       res.json({ success: true });
     }
   });
@@ -248,14 +257,24 @@ async function startServer(): Promise<void> {
       return;
     }
     const history = Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-20) : [];
-    const safeHistory = history.filter((item: unknown): item is { role: 'user' | 'assistant'; content: string; sql?: string } => {
+    const safeHistory = history.filter((item: unknown): item is { role: 'user' | 'assistant'; content: string; sql?: string; resultDigest?: string } => {
       if (!item || typeof item !== 'object') return false;
       const value = item as Record<string, unknown>;
       return (value.role === 'user' || value.role === 'assistant') && typeof value.content === 'string';
-    }).map((item: { role: 'user' | 'assistant'; content: string; sql?: string }) => ({ role: item.role, content: item.content.slice(0, 2000), sql: typeof item.sql === 'string' ? item.sql.slice(0, 10000) : undefined }));
+    }).map((item: { role: 'user' | 'assistant'; content: string; sql?: string; resultDigest?: string }) => ({
+      role: item.role,
+      content: item.content.slice(0, 2000),
+      sql: typeof item.sql === 'string' ? item.sql.slice(0, 10000) : undefined,
+      resultDigest: typeof item.resultDigest === 'string' ? item.resultDigest.slice(0, 500) : undefined,
+    }));
     const conversationId = typeof req.body?.conversationId === 'string' ? req.body.conversationId : undefined;
+    // The chosen model. Anything the client sends that cannot be resolved to a
+    // running model falls back to the configured default inside the router, so
+    // this can only ever change *which* model writes the SQL — never the
+    // database, the credentials, the validator, the allowlist or the session.
+    const requestedModel = typeof req.body?.model === 'string' ? req.body.model : undefined;
     try {
-      const result = await sqlGenerationService.processQuery(question.trim(), req.user, safeHistory, conversationId);
+      const result = await sqlGenerationService.processQuery(question.trim(), req.user, safeHistory, conversationId, requestedModel);
       res.json(result);
     } catch (error) {
       console.error('[Query] pipeline failure:', describeError(error, 'unknown error'));
@@ -265,6 +284,28 @@ async function startServer(): Promise<void> {
 
   app.post('/api/query', requireAuth, queryHandler);
   app.post('/api/query/translate', requireAuth, queryHandler);
+
+  /**
+   * The model catalogue behind the UI's selector.
+   *
+   * Session-gated but not admin-gated: every chat user needs to know which
+   * models exist to pick one. Availability is measured per request against the
+   * running servers, so `available: false` here means "this really is not
+   * running right now", not "the browser was told so at build time".
+   *
+   * No endpoint address, port, credential or filesystem path is returned.
+   */
+  app.get('/api/models', requireAuth, async (_req: Request, res: Response) => {
+    try {
+      res.json({
+        models: await listAvailableModels(),
+        defaultProvider: DEFAULT_PROVIDER_ID,
+      });
+    } catch (error) {
+      console.error('[Models] listing failed:', describeError(error, 'unknown error'));
+      res.status(503).json({ error: 'The local model list is currently unavailable.', models: [] });
+    }
+  });
 
   // Conversations. `processQuery` already persists turns when a conversationId
   // is supplied; these routes are what the chat-history sidebar reads back, so
@@ -697,12 +738,27 @@ async function startServer(): Promise<void> {
   });
 
   app.get('/api/health', async (_req: Request, res: Response) => {
-    const [ollama, postgres] = await Promise.all([checkOllamaStatus(), checkPostgresConnection()]);
+    const [ollama, postgres, models] = await Promise.all([
+      checkOllamaStatus(),
+      checkPostgresConnection(),
+      listAvailableModels().catch(() => []),
+    ]);
     res.json({
       server: 'ok',
+      // `ollama` stays as its own field because existing tooling reads it.
       ollama: ollama.available ? 'ok' : 'offline',
-      postgresql: postgres ? 'ok' : 'offline',
       ollama_model: OLLAMA_MODEL,
+      postgresql: postgres ? 'ok' : 'offline',
+      database: process.env.DB_NAME || 'arcgpt_new',
+      default_model_provider: DEFAULT_PROVIDER_ID,
+      // Per-provider availability, so a down LM Studio is visible without
+      // making the whole service look broken.
+      models: models.map(model => ({
+        id: model.id,
+        name: model.name,
+        provider: model.provider,
+        available: model.available,
+      })),
     });
   });
 
@@ -761,13 +817,20 @@ async function startServer(): Promise<void> {
   }
 
   const server = app.listen(PORT, '0.0.0.0', async () => {
-    const [ollama, postgres] = await Promise.all([checkOllamaStatus(), checkPostgresConnection()]);
+    const [postgres, models, defaultModel] = await Promise.all([
+      checkPostgresConnection(),
+      listAvailableModels().catch(() => []),
+      resolveModelSelection().catch(() => undefined),
+    ]);
     console.log('ArcGPT Local');
     console.log('-------------------------');
     console.log(`PostgreSQL: ${postgres ? 'CONNECTED' : 'OFFLINE'}`);
-    console.log(`Ollama: ${ollama.available ? 'CONNECTED' : 'OFFLINE'}`);
-    console.log(`Model: ${OLLAMA_MODEL}`);
-    console.log(`Database: ${process.env.DB_NAME || 'arcgpt_institution'}`);
+    console.log(`Database:   ${process.env.DB_NAME || 'arcgpt_new'}`);
+    for (const model of models) {
+      const marker = model.id === defaultModel?.id ? '>' : model.available ? '·' : 'x';
+      console.log(`${marker} ${model.name} (${model.providerLabel})${model.available ? '' : ' - unavailable'}`);
+    }
+    console.log(`Default provider: ${DEFAULT_PROVIDER_ID}`);
     console.log('Server: RUNNING');
     console.log('-------------------------');
   });

@@ -31,25 +31,45 @@ const BLOCKED_IDENTIFIERS = [
   'pg_execute_server_program', 'lo_import', 'lo_export',
 ];
 
-const SENSITIVE_TABLES = new Set(['fees', 'hostel_allocations', 'hostels', 'rooms', 'student_transport']);
+/**
+ * Financial and residential records. These are money and living arrangements,
+ * not academic data, so only the Accounts role may read them.
+ */
+const SENSITIVE_TABLES = new Set([
+  'student_fees', 'fee_payments', 'fee_structure', 'fee_types', 'v_fee_status',
+  'hostels', 'hostel_rooms', 'hostel_allocations', 'v_hostel_allocation',
+]);
 
 /**
  * Guardian contact details are personal data, not academic records.
  *
- * `guardians` is the source table and `student_profile_view` projects the same
- * columns, so both are restricted. An HOD or Faculty member asking about
- * attendance or CGPA has no reason to be handed parents' phone numbers and home
- * addresses, and the read-only pool would happily return them. Only roles that
- * are already trusted with institution-wide student administration may see this.
+ * `guardians` is the source table and `v_student_directory` projects the same
+ * columns as mother_/father_/guardian_ columns, so both are restricted. An HOD
+ * or Faculty member asking about attendance or CGPA has no reason to be handed
+ * parents' phone numbers, and the read-only pool would happily return them.
+ * Only roles already trusted with institution-wide student administration may
+ * see this.
  */
-const GUARDIAN_PII_TABLES = new Set(['guardians', 'student_profile_view']);
+const GUARDIAN_PII_TABLES = new Set(['guardians', 'v_student_directory']);
 const GUARDIAN_PII_ROLES = new Set(['ADMIN', 'SUPER_ADMIN', 'PRINCIPAL']);
-const PLACEMENT_TABLES = new Set(['placement_drives', 'placement_applications']);
-const LIBRARY_TABLES = new Set(['books', 'library_transactions']);
+
 const ACADEMIC_TABLES = new Set([
-  'students', 'departments', 'faculty', 'subjects', 'course_offerings', 'attendance',
-  'assessments', 'student_marks', 'assignments', 'submissions', 'semester_results',
-  'student_academic_summary', 'backlogs', 'timetable', 'exams', 'exam_schedule', 'announcements',
+  'students', 'v_student_directory', 'departments', 'faculty', 'subjects',
+  'course_offerings', 'attendance', 'v_attendance_detail', 'v_student_attendance_summary',
+  'student_marks', 'v_marks_detail', 'iat_marks', 'v_iat_marks', 'semester_results',
+  'v_student_cgpa', 'student_academic_summary', 'backlogs', 'v_backlog_detail',
+  'timetable', 'v_timetable_detail', 'sections', 'batches', 'semesters', 'programs',
+  'years_of_study', 'student_enrollments', 'enrollments',
+]);
+
+/**
+ * Tables that carry no department_id of their own, so department scoping has to
+ * be reached through a join. Used by the HOD structural proof.
+ */
+const DEPARTMENT_KEY_TABLES = new Set([
+  'departments', 'sections', 'subjects', 'v_student_directory', 'v_marks_detail',
+  'v_attendance_detail', 'v_student_attendance_summary', 'v_backlog_detail',
+  'v_iat_marks', 'v_timetable_detail', 'v_hostel_allocation', 'students', 'faculty',
 ]);
 
 function maskQuotedSql(sql: string): string {
@@ -302,16 +322,36 @@ function validateHodAst(sql: string, user: User): string | undefined {
     }
   }
 
-  const directCodeTables = new Set(['student_profile_view', 'student_attendance_percentage']);
-  const directIdTables = new Set(['students', 'faculty', 'subjects', 'timetable', 'announcements']);
-  const studentChildTables = new Set(['attendance', 'student_marks', 'backlogs', 'semester_results', 'student_academic_summary', 'student_residency', 'submissions', 'student_attendance_percentage']);
+  // The v_* read models already carry department_code / department_id, so a
+  // single-source query can be proven scoped by a direct equality on them.
+  const directCodeTables = new Set([
+    'v_student_directory', 'v_marks_detail', 'v_attendance_detail',
+    'v_student_attendance_summary', 'v_backlog_detail', 'v_iat_marks',
+    'v_timetable_detail', 'v_hostel_allocation', 'student_academic_summary',
+  ]);
+  const directIdTables = new Set(['students', 'faculty', 'subjects', 'sections', 'batches']);
+  // Tables that only make sense underneath a proven student. The v_* read
+  // models are listed because they carry student_id too, so joining one to a
+  // department-scoped `students` alias is exactly as safe as joining the raw
+  // assessment tables it was built from.
+  const studentChildTables = new Set([
+    'attendance', 'student_marks', 'iat_marks', 'backlogs', 'semester_results',
+    'student_enrollments', 'v_student_cgpa',
+    'v_attendance_detail', 'v_student_attendance_summary', 'v_marks_detail',
+    'v_iat_marks', 'v_backlog_detail', 'v_hostel_allocation', 'student_academic_summary',
+  ]);
+  // Reference data with no department of its own and nothing sensitive on it.
+  const unscopeableButHarmless = new Set([
+    'semesters', 'years_of_study', 'academic_years', 'weekdays', 'period_slots',
+    'programs', 'classrooms',
+  ]);
   const departmentAliases = new Set<string>();
   const studentAliases = new Set<string>();
 
   for (const source of sources) {
     if (directCodeTables.has(source.table) && hasDepartmentEquality(whereTerms, source.alias, 'department_code', user.departmentCode, sources.length === 1)) {
       departmentAliases.add(source.alias);
-    } else if (directIdTables.has(source.table) && hasDepartmentEquality(whereTerms, source.alias, 'department_id', String(user.departmentId), sources.length === 1)) {
+    } else if ((directIdTables.has(source.table) || directCodeTables.has(source.table)) && hasDepartmentEquality(whereTerms, source.alias, 'department_id', String(user.departmentId), sources.length === 1)) {
       departmentAliases.add(source.alias);
     } else if (source.table === 'departments' &&
         (hasDepartmentEquality(whereTerms, source.alias, 'department_code', user.departmentCode, sources.length === 1) ||
@@ -321,17 +361,18 @@ function validateHodAst(sql: string, user: User): string | undefined {
   }
 
   for (const source of sources) {
-    if (!departmentAliases.has(source.alias) && (directIdTables.has(source.table) || source.table === 'students') &&
+    if (!departmentAliases.has(source.alias) && (directIdTables.has(source.table) || directCodeTables.has(source.table)) &&
         hasDepartmentJoin(joinConditions, source.alias, departmentAliases)) {
       departmentAliases.add(source.alias);
     }
-    if (departmentAliases.has(source.alias) && (source.table === 'students' || source.table === 'student_profile_view')) {
+    if (departmentAliases.has(source.alias) && (source.table === 'students' || source.table === 'v_student_directory')) {
       studentAliases.add(source.alias);
     }
   }
 
   for (const source of sources) {
     if (departmentAliases.has(source.alias)) continue;
+    if (unscopeableButHarmless.has(source.table)) continue;
     if (studentChildTables.has(source.table) && hasStudentJoin(joinConditions, source.alias, studentAliases)) continue;
     return `REQUEST_BLOCKED: HOD source '${source.table}' is not proven to be restricted to the assigned department.`;
   }
@@ -374,7 +415,13 @@ export class SqlValidationService {
 
     const tokens = normalized.masked.toLowerCase().match(/[a-z_][a-z0-9_$]*/g) || [];
     for (const token of tokens) {
-      if (BLOCKED_KEYWORDS.has(token)) {
+      // BLOCKED_KEYWORDS is declared in upper case, and the token stream is
+      // lower case, so the lookup MUST upper-case the token. Comparing raw
+      // lower-case tokens against the set silently never matches, which would
+      // let a data-modifying CTE such as
+      //   WITH x AS (DELETE FROM students RETURNING *) SELECT * FROM x
+      // through the "must start with SELECT or WITH" gate untouched.
+      if (BLOCKED_KEYWORDS.has(token.toUpperCase())) {
         return { isValid: false, blockedReason: `Query blocked: disallowed operation '${token.toUpperCase()}' detected.`, detectedTables: [], referencedColumns: [] };
       }
     }
@@ -444,13 +491,7 @@ export class SqlValidationService {
       return { allowed: false, reason: 'Your role cannot query application control or audit data.' };
     }
     if ([...tableSet].some(table => SENSITIVE_TABLES.has(table)) && !['ACCOUNTS'].includes(role)) {
-      return { allowed: false, reason: 'Your role cannot query financial, hostel, or transport records.' };
-    }
-    if ([...tableSet].some(table => PLACEMENT_TABLES.has(table)) && !['PLACEMENT_OFFICER'].includes(role)) {
-      return { allowed: false, reason: 'Your role cannot query placement records.' };
-    }
-    if ([...tableSet].some(table => LIBRARY_TABLES.has(table)) && !['LIBRARIAN'].includes(role)) {
-      return { allowed: false, reason: 'Your role cannot query library records.' };
+      return { allowed: false, reason: 'Your role cannot query fee, hostel, or room allocation records.' };
     }
 
     // Principal has global read scope across authorized institution data, but
@@ -459,7 +500,12 @@ export class SqlValidationService {
 
     // STUDENT isolation: Must have student_id scope
     if (role === 'STUDENT') {
-      const studentTables = ['students', 'attendance', 'student_marks', 'assignments', 'submissions', 'backlogs', 'semester_results', 'student_academic_summary'];
+      const studentTables = [
+        'students', 'v_student_directory', 'attendance', 'v_attendance_detail',
+        'v_student_attendance_summary', 'student_marks', 'v_marks_detail', 'iat_marks',
+        'v_iat_marks', 'backlogs', 'v_backlog_detail', 'semester_results', 'v_student_cgpa',
+        'student_academic_summary', 'student_enrollments', 'v_timetable_detail',
+      ];
       if (studentTables.some(table => tableSet.has(table)) && !/\bstudent_id\b/i.test(rawSql)) {
         return { allowed: false, reason: 'Student queries must include a student_id scope.' };
       }
@@ -468,7 +514,7 @@ export class SqlValidationService {
     // HOD Department Isolation Enforcement
     if (role === 'HOD') {
       const hodDeptCode = (user.departmentCode || '').toUpperCase().trim();
-      const allDepts = ['AIML', 'CSE', 'ECE', 'EEE', 'IT', 'MECH', 'CIVIL'];
+      const allDepts = ['AIML', 'CSE', 'ECE', 'MECH'];
       const forbiddenDepts = allDepts.filter(d => d !== hodDeptCode);
 
       // 1. Check if query references any other department in raw SQL (literals or identifiers)
@@ -493,14 +539,16 @@ export class SqlValidationService {
         }
       }
 
-      // 2. Department-scoped tables MUST include the HOD's department filter
-      // `student_residency` is included even though it has no department column
-      // of its own: reaching it means joining students, and an HOD should not be
-      // able to list every hosteller in the institution.
+      // 2. Department-scoped tables MUST include the HOD's department filter.
+      // The v_* read models are included because an HOD has no legitimate reason
+      // to see another department's roster, marks or attendance roll-up.
       const scopedTables = [
-        'students', 'attendance', 'student_marks', 'backlogs', 'semester_results',
-        'student_academic_summary', 'student_attendance_percentage', 'faculty',
-        'subjects', 'assignments', 'course_offerings', 'student_residency'
+        'students', 'v_student_directory', 'student_academic_summary',
+        'attendance', 'v_attendance_detail', 'v_student_attendance_summary',
+        'student_marks', 'v_marks_detail', 'iat_marks', 'v_iat_marks',
+        'backlogs', 'v_backlog_detail', 'semester_results', 'v_student_cgpa',
+        'student_enrollments', 'faculty', 'subjects', 'course_offerings',
+        'sections', 'batches', 'timetable', 'v_timetable_detail',
       ];
 
       if (scopedTables.some(table => tableSet.has(table))) {
@@ -521,7 +569,13 @@ export class SqlValidationService {
     }
 
     if (role === 'FACULTY') {
-      const scopedTables = ['students', 'attendance', 'student_marks', 'backlogs', 'semester_results', 'student_academic_summary', 'student_attendance_percentage', 'student_residency'];
+      const scopedTables = [
+        'students', 'v_student_directory', 'student_academic_summary',
+        'attendance', 'v_attendance_detail', 'v_student_attendance_summary',
+        'student_marks', 'v_marks_detail', 'iat_marks', 'v_iat_marks',
+        'backlogs', 'v_backlog_detail', 'semester_results', 'v_student_cgpa',
+        'student_enrollments',
+      ];
       if (scopedTables.some(table => tableSet.has(table)) && !hasAny(rawSql, ['department_code', 'department_name', 'department_id'])) {
         return { allowed: false, reason: 'Department-scoped roles must include a department filter.' };
       }

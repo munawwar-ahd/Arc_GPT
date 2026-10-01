@@ -1,0 +1,6 @@
+cd backend
+$env:SERVE_FRONTEND='false'
+npm run dev
+
+cd frontend
+npm run dev

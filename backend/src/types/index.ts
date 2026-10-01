@@ -65,6 +65,27 @@ export interface ChartRecommendation {
   description: string;
 }
 
+/**
+ * Which local model produced the SQL for a turn.
+ *
+ * Echoed back so the chat can show what answered, and so a query is
+ * attributable in the log. Deliberately excludes the provider's URL: this
+ * travels to the browser, and the endpoint is not part of the answer.
+ */
+export interface QueryModelInfo {
+  id: string;
+  name: string;
+  provider: 'ollama' | 'lmstudio';
+  providerLabel: string;
+}
+
+/** A model the backend can talk to, with its availability measured live. */
+export interface AvailableModel extends QueryModelInfo {
+  available: boolean;
+  /** One short line: how the id was resolved, or why it is unusable. */
+  detail?: string;
+}
+
 export interface QueryExecutionResult {
   queryId: string;
   conversationId?: string;
@@ -72,6 +93,12 @@ export interface QueryExecutionResult {
   intent?: string;
   generatedSql?: string;
   sanitizedSql?: string;
+  /**
+   * The statement that was rejected for naming a column or table that does not
+   * exist, present only when the pipeline corrected it and the correction
+   * succeeded. `generatedSql` holds the corrected statement in that case.
+   */
+  correctedSql?: string;
   columns: string[];
   rows: Record<string, any>[];
   data?: Record<string, any>[];
@@ -87,6 +114,13 @@ export interface QueryExecutionResult {
   clarificationSuggestions?: string[];
   blockedReason?: string;
   pipelineSteps: PipelineStep[];
+  /** The model that generated this turn's SQL. */
+  model?: QueryModelInfo;
+  /**
+   * Compact digest of the returned rows, echoed so the client can forward it
+   * with the next question and a follow-up can refer to the previous result.
+   */
+  resultDigest?: string;
   isCorrected?: boolean;
   correctionAttempts?: number;
   createdAt: string;
@@ -139,4 +173,9 @@ export interface ConversationContextItem {
   role: 'user' | 'assistant';
   content: string;
   sql?: string;
+  /**
+   * Column names and up to five identifying values from the rows this turn
+   * returned. It is what lets "which of them have backlogs?" resolve "them".
+   */
+  resultDigest?: string;
 }

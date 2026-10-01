@@ -9,12 +9,13 @@ import {
   type RefObject,
 } from 'react';
 import { PanelLeft, Plus } from 'lucide-react';
-import type { ConversationContextItem, QueryExecutionStatus } from '../types/index.js';
+import type { AvailableModel, ConversationContextItem, QueryExecutionStatus } from '../types/index.js';
 import { apiJson, apiPost } from '../lib/apiClient.js';
 import type { ExportableAnswer } from '../lib/exportAnswer.js';
 import { ArcVideo } from './ArcVideo.js';
 import { SendButton } from './LiquidMetalSendButton.js';
 import { ChatExportMenu } from './ChatExportMenu.js';
+import { ModelSelector, readStoredModelId } from './ModelSelector.js';
 import {
   Sidebar,
   SidebarBody,
@@ -33,6 +34,12 @@ interface NormalizedResult {
   status: QueryExecutionStatus;
   /** ArcGPT-Backend's id for the stored conversation, once it has created one. */
   conversationId?: string;
+  /**
+   * Compact digest of the returned rows. Forwarded with the next question so a
+   * follow-up like "which of them have backlogs?" can resolve "them" against the
+   * previous result instead of re-running the original broad query.
+   */
+  resultDigest?: string;
 }
 
 interface ChatMessage {
@@ -128,6 +135,7 @@ function normalizeResponse(payload: unknown): NormalizedResult {
     ? result.clarificationSuggestions.filter((suggestion): suggestion is string => typeof suggestion === 'string')
     : [];
   const conversationId = asText(result.conversationId);
+  const resultDigest = asText(result.resultDigest);
 
   return {
     answer:
@@ -139,6 +147,7 @@ function normalizeResponse(payload: unknown): NormalizedResult {
     suggestions,
     status,
     ...(conversationId ? { conversationId } : {}),
+    ...(resultDigest ? { resultDigest } : {}),
   };
 }
 
@@ -162,6 +171,7 @@ function updateConversationContext(
       role: 'assistant',
       content: result.answer,
       ...(contextSql ? { sql: contextSql } : {}),
+      ...(result.resultDigest ? { resultDigest: result.resultDigest } : {}),
     },
   ];
   return nextContext.slice(-12);
@@ -396,10 +406,11 @@ function LoadingMessage({ active }: { active: boolean }) {
             </filter>
           </defs>
         </svg>
+        
         <video
           ref={videoRef}
           className="arc-thinking-video"
-          src="/arc/inside-chat-animation.mp4"
+          src={`${import.meta.env.BASE_URL}arc/inside-chat-animation.mp4`}
           autoPlay
           loop
           muted
@@ -461,6 +472,11 @@ export function UserChat() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Which local model answers the next question. The list comes from the
+  // backend's /api/models, which measures each provider's availability live;
+  // the chosen id is what selects the engine, and nothing else.
+  const [models, setModels] = useState<AvailableModel[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>(() => readStoredModelId());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   // Conversation follow-up context, kept per thread so switching threads does
@@ -472,6 +488,9 @@ export function UserChat() {
   const requestControllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const isLoadingRef = useRef(false);
+  // Mirrored out of state so submitMessage can read the selection without
+  // taking `selectedModelId` as a dependency and rebuilding on every change.
+  const selectedModelIdRef = useRef(selectedModelId);
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
@@ -576,6 +595,53 @@ export function UserChat() {
     };
   }, []);
 
+  /**
+   * Loads the model catalogue and picks an initial selection.
+   *
+   * Fetched rather than hard-coded so `available` reflects the running servers:
+   * an LM Studio that is not running is shown as unavailable with a reason
+   * instead of failing on click. The stored preference wins when it is still
+   * usable, otherwise the first available model is chosen, otherwise the
+   * backend's own default applies (no `model` is sent).
+   *
+   * A failure here is swallowed — the chat must keep working even if the
+   * catalogue cannot be read, and the backend then uses its default engine.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await apiJson<{ models?: AvailableModel[] }>('/api/models');
+        if (cancelled) return;
+        const list = Array.isArray(payload?.models)
+          ? payload.models.filter(
+              (model): model is AvailableModel =>
+                Boolean(model) && typeof model.id === 'string' && model.id.length > 0
+            )
+          : [];
+        setModels(list);
+
+        const stored = selectedModelIdRef.current;
+        const storedStillUsable = list.find(model => model.id === stored && model.available);
+        const initial = storedStillUsable ?? list.find(model => model.available);
+        if (initial) {
+          selectedModelIdRef.current = initial.id;
+          setSelectedModelId(initial.id);
+        }
+      } catch {
+        // The catalogue is a convenience; the query path still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleModelSelect = useCallback((model: AvailableModel) => {
+    selectedModelIdRef.current = model.id;
+    setSelectedModelId(model.id);
+  }, []);
+
   useEffect(() => {
     if (phase === 'conversation') {
       inputRef.current?.focus();
@@ -642,6 +708,10 @@ export function UserChat() {
         // Sending nothing on the first turn would persist nothing at all and
         // the thread would silently never reach the history sidebar.
         const conversationId = conversationIdRef.current.get(threadId) ?? threadId;
+        // `model` selects the LLM and nothing else. The backend resolves it to a
+        // running model; it cannot reach the database, its credentials, the SQL
+        // validator or any permission, so the guardrail chain is identical for
+        // every entry in the selector.
         const payload = await apiJson<unknown>(
           '/api/query/translate',
           apiPost(
@@ -649,6 +719,7 @@ export function UserChat() {
               query,
               conversationHistory: conversationContextRef.current.get(threadId) ?? [],
               conversationId,
+              ...(selectedModelIdRef.current ? { model: selectedModelIdRef.current } : {}),
             },
             controller.signal
           )
@@ -869,7 +940,7 @@ export function UserChat() {
   return (
     <div className="arc-user-root">
       {phase === 'conversation' && (
-        <ArcVideo className="arc-chat-bg" src="/arc/chat-asterisk-rotate.mp4" />
+        <ArcVideo className="arc-chat-bg" src={`${import.meta.env.BASE_URL}arc/chat-asterisk-rotate.mp4`} />
       )}
 
       {/*
@@ -910,6 +981,22 @@ export function UserChat() {
                 <div className="arc-hero-mark">
                   <ArcVideo />
                 </div>
+                {/*
+                    The selector is on the landing screen too, not only in the
+                    conversation topbar. The very first question of a session is
+                    typed here, so a control that only appeared after the first
+                    exchange could not influence it. Same component, same
+                    position relative to the history toggle, so nothing about the
+                    hero or the composer moves.
+                */}
+                <div className="arc-model-float">
+                  <ModelSelector
+                    models={models}
+                    selectedId={selectedModelId}
+                    onSelect={handleModelSelect}
+                    disabled={isLoading}
+                  />
+                </div>
                 <div className="arc-intro-composer">
                   <ChatComposer
                     value={draft}
@@ -928,7 +1015,7 @@ export function UserChat() {
                   <div className="arc-mini-brand" aria-label="ArcGPT">
                     <img
                       className="arc-mini-brand-mark"
-                      src="/brand/arcgpt-mark-gold.png"
+                      src={`${import.meta.env.BASE_URL}brand/arcgpt-mark-gold.png`}
                       alt=""
                       width={20}
                       height={20}
@@ -936,6 +1023,12 @@ export function UserChat() {
                     <span>ArcGPT</span>
                   </div>
                   <div className="arc-chat-topbar-actions">
+                    <ModelSelector
+                      models={models}
+                      selectedId={selectedModelId}
+                      onSelect={handleModelSelect}
+                      disabled={isLoading}
+                    />
                     <button
                       className="arc-history-toggle"
                       type="button"

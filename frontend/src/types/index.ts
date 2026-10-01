@@ -71,6 +71,29 @@ export interface ChartRecommendation {
   description: string;
 }
 
+/**
+ * A local model ArcGPT can query with.
+ *
+ * Mirrors the backend's `AvailableModel`. `available` is measured against the
+ * running server on the backend, never assumed, so the selector can offer the
+ * truth. `detail` explains *why* something is unavailable in one line.
+ */
+export interface AvailableModel {
+  id: string;
+  name: string;
+  provider: 'ollama' | 'lmstudio';
+  providerLabel: string;
+  available: boolean;
+  detail?: string;
+}
+
+export interface QueryModelInfo {
+  id: string;
+  name: string;
+  provider: 'ollama' | 'lmstudio';
+  providerLabel: string;
+}
+
 export interface QueryExecutionResult {
   queryId: string;
   conversationId?: string;
@@ -93,6 +116,10 @@ export interface QueryExecutionResult {
   clarificationSuggestions?: string[];
   blockedReason?: string;
   pipelineSteps: PipelineStep[];
+  /** The model that generated this turn's SQL. */
+  model?: QueryModelInfo;
+  /** Compact digest of the returned rows, used to resolve follow-up questions. */
+  resultDigest?: string;
   isCorrected?: boolean;
   correctionAttempts?: number;
   createdAt: string;
@@ -145,4 +172,10 @@ export interface ConversationContextItem {
   role: 'user' | 'assistant';
   content: string;
   sql?: string;
+  /**
+   * Column names and a few identifying values from the rows this turn returned.
+   * Forwarded so a follow-up such as "which of them have backlogs?" resolves
+   * "them" against the previous result instead of re-running the whole query.
+   */
+  resultDigest?: string;
 }

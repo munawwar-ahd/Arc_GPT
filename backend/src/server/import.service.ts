@@ -2,15 +2,21 @@ import { pool } from './db.js';
 import { User } from '../types/index.js';
 import { auditService } from './audit.service.js';
 
+/**
+ * Tables that can be bulk-loaded from a flat CSV.
+ *
+ * Only the flat reference and identity tables are listed. The assessment and
+ * attendance tables all key on `offering_id` — the bridge that records which
+ * subject was delivered to which section in which academic year — and cannot be
+ * addressed by a human-readable CSV column without a resolution layer that
+ * would be far more fragile than a preview. Those tables are populated by the
+ * academic pipeline instead, so they are deliberately not importable.
+ */
 export const ALLOWED_IMPORT_TABLES = [
-  'students',
-  'faculty',
   'departments',
+  'faculty',
   'subjects',
-  'attendance',
-  'student_marks',
-  'assignments',
-  'backlogs',
+  'students',
 ] as const;
 
 export type ImportTableName = (typeof ALLOWED_IMPORT_TABLES)[number];
@@ -37,23 +43,11 @@ export const IMPORT_CONFIGS: Record<ImportTableName, TableImportConfig> = {
     dbTable: 'public.departments',
     uniqueKey: 'department_code',
     fields: [
-      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Unique code e.g. AIML, CSE', sample: 'AI_DS' },
-      { name: 'department_name', label: 'Department Name', required: true, type: 'string', description: 'Full name', sample: 'Artificial Intelligence and Data Science' },
-    ],
-  },
-  students: {
-    tableName: 'students',
-    dbTable: 'public.students',
-    uniqueKey: 'register_number',
-    fields: [
-      { name: 'register_number', label: 'Register Number', required: true, type: 'string', description: 'Unique institution registration number', sample: '24AIML001' },
-      { name: 'first_name', label: 'First Name', required: true, type: 'string', description: 'First name', sample: 'Rahul' },
-      { name: 'last_name', label: 'Last Name', required: true, type: 'string', description: 'Last name', sample: 'Kumar' },
-      { name: 'email', label: 'Email', required: false, type: 'email', description: 'Student email address', sample: 'rahul.kumar@arcai.edu' },
-      { name: 'phone', label: 'Phone', required: false, type: 'string', description: 'Phone number', sample: '9876543210' },
-      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Existing department code', sample: 'AIML' },
-      { name: 'admission_number', label: 'Admission Number', required: false, type: 'string', description: 'Unique admission number', sample: 'ADM-2024-001' },
-      { name: 'status', label: 'Status', required: false, type: 'string', description: 'ACTIVE, INACTIVE, ALUMNI, SUSPENDED', sample: 'ACTIVE' },
+      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Unique short code, 2-10 upper-case letters', sample: 'AIML' },
+      { name: 'department_name', label: 'Department Name', required: true, type: 'string', description: 'Full department name', sample: 'Artificial Intelligence and Machine Learning' },
+      { name: 'established_year', label: 'Established Year', required: false, type: 'number', description: 'Year the department was established', sample: '2014' },
+      { name: 'email', label: 'Email', required: false, type: 'email', description: 'Department email', sample: 'aiml@arccollege.edu' },
+      { name: 'phone', label: 'Phone', required: false, type: 'string', description: 'Department phone', sample: '9840010001' },
     ],
   },
   faculty: {
@@ -61,13 +55,14 @@ export const IMPORT_CONFIGS: Record<ImportTableName, TableImportConfig> = {
     dbTable: 'public.faculty',
     uniqueKey: 'employee_id',
     fields: [
-      { name: 'employee_id', label: 'Employee ID', required: true, type: 'string', description: 'Unique faculty employee ID', sample: 'EMP-AIML-010' },
+      { name: 'employee_id', label: 'Employee ID', required: true, type: 'string', description: 'Unique faculty employee number', sample: 'EMP-A009' },
       { name: 'first_name', label: 'First Name', required: true, type: 'string', description: 'First name', sample: 'Priya' },
-      { name: 'last_name', label: 'Last Name', required: true, type: 'string', description: 'Last name', sample: 'Nair' },
-      { name: 'designation', label: 'Designation', required: true, type: 'string', description: 'e.g. Assistant Professor, Professor', sample: 'Associate Professor' },
-      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Existing department code', sample: 'AIML' },
-      { name: 'email', label: 'Email', required: false, type: 'email', description: 'Faculty email', sample: 'priya.nair@arcai.edu' },
-      { name: 'phone', label: 'Phone', required: false, type: 'string', description: 'Phone number', sample: '9876501234' },
+      { name: 'last_name', label: 'Last Name', required: true, type: 'string', description: 'Surname', sample: 'Balasubramanian' },
+      { name: 'designation', label: 'Designation', required: true, type: 'string', description: 'e.g. Assistant Professor, Professor and Head', sample: 'Associate Professor' },
+      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Must match an existing department', sample: 'AIML' },
+      { name: 'email', label: 'Email', required: true, type: 'email', description: 'Must be unique', sample: 'priya.balasubramanian@arccollege.edu' },
+      { name: 'phone', label: 'Phone', required: true, type: 'string', description: 'Phone number', sample: '9876501234' },
+      { name: 'date_of_joined', label: 'Date Joined', required: true, type: 'date', description: 'YYYY-MM-DD', sample: '2024-07-01' },
     ],
   },
   subjects: {
@@ -75,50 +70,34 @@ export const IMPORT_CONFIGS: Record<ImportTableName, TableImportConfig> = {
     dbTable: 'public.subjects',
     uniqueKey: 'subject_code',
     fields: [
-      { name: 'subject_code', label: 'Subject Code', required: true, type: 'string', description: 'Unique subject code', sample: 'AI301' },
-      { name: 'subject_name', label: 'Subject Name', required: true, type: 'string', description: 'Full subject title', sample: 'Deep Learning and Neural Networks' },
-      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Existing department code', sample: 'AIML' },
-      { name: 'credits', label: 'Credits', required: false, type: 'number', description: 'Course credit value', sample: '4.0' },
+      { name: 'subject_code', label: 'Subject Code', required: true, type: 'string', description: 'Unique code, 2-6 upper-case letters then 3-4 digits', sample: 'AI201' },
+      { name: 'subject_name', label: 'Subject Name', required: true, type: 'string', description: 'Full subject title', sample: 'Database Management Systems' },
+      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Owning department, must match an existing one', sample: 'AIML' },
+      { name: 'semester_number', label: 'Semester Number', required: true, type: 'number', description: 'Semester position 1 to 8', sample: '3' },
+      { name: 'credits', label: 'Credits', required: true, type: 'number', description: 'Credit value, greater than 0', sample: '4' },
+      { name: 'subject_type', label: 'Subject Type', required: false, type: 'string', description: 'THEORY, LAB, THEORY_LAB or PROJECT. Defaults to THEORY.', sample: 'THEORY_LAB' },
     ],
   },
-  attendance: {
-    tableName: 'attendance',
-    dbTable: 'public.attendance',
+  students: {
+    tableName: 'students',
+    dbTable: 'public.students',
+    uniqueKey: 'register_number',
     fields: [
-      { name: 'register_number', label: 'Student Register Number', required: true, type: 'string', description: 'Student identifier', sample: '24AIML001' },
-      { name: 'attendance_date', label: 'Date', required: true, type: 'date', description: 'YYYY-MM-DD', sample: '2025-02-15' },
-      { name: 'status', label: 'Status', required: true, type: 'string', description: 'PRESENT, ABSENT, OD, LATE', sample: 'PRESENT' },
-      { name: 'remarks', label: 'Remarks', required: false, type: 'string', description: 'Optional comments', sample: 'On time' },
-    ],
-  },
-  student_marks: {
-    tableName: 'student_marks',
-    dbTable: 'public.student_marks',
-    fields: [
-      { name: 'register_number', label: 'Student Register Number', required: true, type: 'string', description: 'Student identifier', sample: '24AIML001' },
-      { name: 'marks_obtained', label: 'Marks Obtained', required: true, type: 'number', description: 'Numeric score', sample: '88.5' },
-      { name: 'max_marks', label: 'Max Marks', required: false, type: 'number', description: 'Maximum score possible', sample: '100' },
-      { name: 'grade', label: 'Grade', required: false, type: 'string', description: 'Letter grade e.g. A, B+', sample: 'A+' },
-    ],
-  },
-  assignments: {
-    tableName: 'assignments',
-    dbTable: 'public.assignments',
-    fields: [
-      { name: 'title', label: 'Title', required: true, type: 'string', description: 'Assignment title', sample: 'Assignment 3 - Convolutional Nets' },
-      { name: 'description', label: 'Description', required: false, type: 'string', description: 'Brief description', sample: 'Implement ResNet on CIFAR-10' },
-      { name: 'due_date', label: 'Due Date', required: false, type: 'date', description: 'YYYY-MM-DD', sample: '2025-03-30' },
-      { name: 'max_marks', label: 'Max Marks', required: false, type: 'number', description: 'Maximum points', sample: '50' },
-    ],
-  },
-  backlogs: {
-    tableName: 'backlogs',
-    dbTable: 'public.backlogs',
-    fields: [
-      { name: 'register_number', label: 'Student Register Number', required: true, type: 'string', description: 'Student identifier', sample: '24AIML001' },
-      { name: 'subject_code', label: 'Subject Code', required: true, type: 'string', description: 'Subject code with backlog', sample: 'AI201' },
-      { name: 'attempt_count', label: 'Attempt Count', required: false, type: 'number', description: 'Number of attempts', sample: '1' },
-      { name: 'status', label: 'Status', required: false, type: 'string', description: 'ACTIVE, CLEARED', sample: 'ACTIVE' },
+      { name: 'register_number', label: 'Register Number', required: true, type: 'string', description: 'Unique registration number, 6-20 upper-case letters and digits', sample: 'AIML12024A01' },
+      { name: 'admission_number', label: 'Admission Number', required: true, type: 'string', description: 'Unique admission number', sample: 'ADM202400001' },
+      { name: 'first_name', label: 'First Name', required: true, type: 'string', description: 'First name', sample: 'Rohan' },
+      { name: 'last_name', label: 'Last Name', required: true, type: 'string', description: 'Surname', sample: 'Nair' },
+      { name: 'gender', label: 'Gender', required: true, type: 'string', description: 'MALE, FEMALE or OTHER', sample: 'MALE' },
+      { name: 'date_of_birth', label: 'Date of Birth', required: true, type: 'date', description: 'YYYY-MM-DD', sample: '2006-04-18' },
+      { name: 'department_code', label: 'Department Code', required: true, type: 'string', description: 'Must match an existing department', sample: 'AIML' },
+      { name: 'batch_code', label: 'Batch Code', required: true, type: 'string', description: 'Admission cohort, e.g. AIML-2024. Must already exist.', sample: 'AIML-2024' },
+      { name: 'section_code', label: 'Section Code', required: true, type: 'string', description: 'Single letter A-Z. Must already exist for the batch.', sample: 'A' },
+      { name: 'residence_status', label: 'Residence Status', required: true, type: 'string', description: 'HOSTELLER or DAY_SCHOLAR', sample: 'DAY_SCHOLAR' },
+      { name: 'email', label: 'Email', required: true, type: 'email', description: 'Must be unique', sample: 'rohan.nair@student.arccollege.edu' },
+      { name: 'phone', label: 'Phone', required: true, type: 'string', description: 'Phone number', sample: '9000000123' },
+      { name: 'admission_date', label: 'Admission Date', required: true, type: 'date', description: 'YYYY-MM-DD', sample: '2024-08-01' },
+      { name: 'status', label: 'Status', required: false, type: 'string', description: 'ACTIVE, INACTIVE, ON_LEAVE or GRADUATED. Defaults to ACTIVE.', sample: 'ACTIVE' },
+      { name: 'address', label: 'Address', required: false, type: 'string', description: 'Home address', sample: '12, Anna Nagar, Chennai 600040' },
     ],
   },
 };
@@ -247,13 +226,24 @@ export class ImportService {
     );
     const validDeptCodes = new Set(deptRows.rows.map(d => d.department_code));
 
-    // Cache students if needed
-    let validStudentRegs = new Set<string>();
-    if (['attendance', 'student_marks', 'backlogs'].includes(tableName)) {
-      const studentRows = await pool.query<{ register_number: string }>(
-        'SELECT UPPER(register_number) AS register_number FROM public.students'
+    // Students are no longer imported by register_number reference, but the
+    // batch/section pair still has to resolve against existing academic
+    // structure, so those lookups are cached for the students table only.
+    let validBatchSections = new Set<string>();
+    let validSemesterNumbers = new Set<number>();
+    if (tableName === 'students') {
+      const sectionRows = await pool.query<{ batch_code: string; section_code: string }>(
+        `SELECT UPPER(b.batch_code) AS batch_code, s.section_code
+         FROM public.sections s
+         JOIN public.batches b ON b.batch_id = s.batch_id`
       );
-      validStudentRegs = new Set(studentRows.rows.map(s => s.register_number));
+      validBatchSections = new Set(sectionRows.rows.map(s => `${s.batch_code}|${s.section_code}`));
+    }
+    if (tableName === 'subjects') {
+      const semRows = await pool.query<{ semester_number: number }>(
+        'SELECT semester_number FROM public.semesters'
+      );
+      validSemesterNumbers = new Set(semRows.rows.map(s => s.semester_number));
     }
 
     const seenUniqueKeys = new Set<string>();
@@ -313,7 +303,12 @@ export class ImportService {
           }
 
           // Foreign Key validations
-          if (field.name === 'department_code' && !validDeptCodes.has(val.toUpperCase())) {
+          // A department_code must name an EXISTING department - except when the
+          // import target IS departments, where the column is the new
+          // department's own key and so cannot already exist.
+          if (field.name === 'department_code'
+              && tableName !== 'departments'
+              && !validDeptCodes.has(val.toUpperCase())) {
             errors.push({
               row: rowNum,
               field: 'department_code',
@@ -321,14 +316,49 @@ export class ImportService {
             });
           }
 
-          if (field.name === 'register_number' && ['attendance', 'student_marks', 'backlogs'].includes(tableName)) {
-            if (!validStudentRegs.has(val.toUpperCase())) {
+          // A student can only be placed in a section that already exists for
+          // their batch, so both halves of the pair are checked together.
+          if (tableName === 'students' && row.batch_code && row.section_code) {
+            const key = `${row.batch_code.trim().toUpperCase()}|${row.section_code.trim().toUpperCase()}`;
+            if (!validBatchSections.has(key)) {
               errors.push({
                 row: rowNum,
-                field: 'register_number',
-                message: `Row ${rowNum}: Student with register number '${val}' does not exist.`,
+                field: 'section_code',
+                message: `Row ${rowNum}: No section '${row.section_code.trim()}' exists for batch '${row.batch_code.trim()}'. Create the batch and its sections first.`,
               });
             }
+          }
+
+          if (field.name === 'semester_number' && !validSemesterNumbers.has(Number(val))) {
+            errors.push({
+              row: rowNum,
+              field: 'semester_number',
+              message: `Row ${rowNum}: '${val}' is not a valid semester. Must be 1 to 8.`,
+            });
+          }
+
+          if (field.name === 'gender' && !['MALE', 'FEMALE', 'OTHER'].includes(val.toUpperCase())) {
+            errors.push({
+              row: rowNum,
+              field: 'gender',
+              message: `Row ${rowNum}: Gender must be MALE, FEMALE or OTHER, got '${val}'.`,
+            });
+          }
+
+          if (field.name === 'residence_status' && !['HOSTELLER', 'DAY_SCHOLAR'].includes(val.toUpperCase())) {
+            errors.push({
+              row: rowNum,
+              field: 'residence_status',
+              message: `Row ${rowNum}: Residence status must be HOSTELLER or DAY_SCHOLAR, got '${val}'.`,
+            });
+          }
+
+          if (field.name === 'subject_type' && !['THEORY', 'LAB', 'THEORY_LAB', 'PROJECT'].includes(val.toUpperCase())) {
+            errors.push({
+              row: rowNum,
+              field: 'subject_type',
+              message: `Row ${rowNum}: Subject type must be THEORY, LAB, THEORY_LAB or PROJECT, got '${val}'.`,
+            });
           }
         }
       }
@@ -365,19 +395,78 @@ export class ImportService {
       throw new Error('No rows to import.');
     }
 
-    // Resolve departments map
+    // --- Resolution maps -------------------------------------------------
+    // The schema is properly normalised, so a flat CSV has to be resolved into
+    // foreign keys before it can be inserted. Every lookup is done once up
+    // front so the per-row loop stays a single statement.
     const deptRows = await pool.query<{ department_id: string; department_code: string }>(
       'SELECT department_id, UPPER(department_code) AS department_code FROM public.departments'
     );
     const deptMap = new Map(deptRows.rows.map(d => [d.department_code, d.department_id]));
 
-    // Resolve student register numbers if needed
-    const studentMap = new Map<string, string>();
-    if (['attendance', 'student_marks', 'backlogs'].includes(tableName)) {
-      const studentRows = await pool.query<{ student_id: string; register_number: string }>(
-        'SELECT student_id, UPPER(register_number) AS register_number FROM public.students'
+    const programMap = new Map<string, string>();
+    if (tableName === 'students') {
+      const programRows = await pool.query<{ program_id: string; department_code: string }>(
+        `SELECT pr.program_id, UPPER(d.department_code) AS department_code
+         FROM public.programs pr
+         JOIN public.departments d ON d.department_id = pr.department_id`
       );
-      studentRows.rows.forEach(s => studentMap.set(s.register_number, s.student_id));
+      programRows.rows.forEach(p => {
+        if (!programMap.has(p.department_code)) programMap.set(p.department_code, p.program_id);
+      });
+    }
+
+    // batch + section -> the ids a student row needs, plus the year of study
+    // and admission year implied by the batch.
+    interface StudentPlacement {
+      batchId: string; sectionId: string; programId: string;
+      yearOfStudyId: string; admissionYear: number; currentAcademicYearId: string;
+    }
+    const placementMap = new Map<string, StudentPlacement>();
+    if (tableName === 'students') {
+      const placeRows = await pool.query<{
+        batch_code: string; section_code: string; batch_id: string; section_id: string;
+        program_id: string; year_of_study_id: string; admission_year: number;
+        academic_year_id: string;
+      }>(
+        `SELECT UPPER(b.batch_code) AS batch_code,
+                s.section_code,
+                b.batch_id,
+                s.section_id,
+                b.program_id,
+                s.year_of_study_id,
+                b.admission_year,
+                s.academic_year_id
+         FROM public.sections s
+         JOIN public.batches b ON b.batch_id = s.batch_id`
+      );
+      placeRows.rows.forEach(p => {
+        placementMap.set(`${p.batch_code}|${p.section_code}`, {
+          batchId: p.batch_id,
+          sectionId: p.section_id,
+          programId: p.program_id,
+          yearOfStudyId: p.year_of_study_id,
+          admissionYear: p.admission_year,
+          currentAcademicYearId: p.academic_year_id,
+        });
+      });
+    }
+
+    // The semester a student is currently sitting is 2 x their year of study.
+    const semesterByYearMap = new Map<number, string>();
+    if (tableName === 'students') {
+      const semRows = await pool.query<{ semester_number: number; semester_id: string }>(
+        'SELECT semester_number, semester_id FROM public.semesters'
+      );
+      semRows.rows.forEach(s => semesterByYearMap.set(s.semester_number, s.semester_id));
+    }
+
+    const semesterNumberMap = new Map<number, string>();
+    if (tableName === 'subjects') {
+      const semRows = await pool.query<{ semester_number: number; semester_id: string }>(
+        'SELECT semester_number, semester_id FROM public.semesters'
+      );
+      semRows.rows.forEach(s => semesterNumberMap.set(s.semester_number, s.semester_id));
     }
 
     const client = await pool.connect();
@@ -389,123 +478,126 @@ export class ImportService {
       for (const row of rows) {
         if (tableName === 'departments') {
           await client.query(
-            `INSERT INTO public.departments (department_code, department_name)
-             VALUES ($1, $2)
-             ON CONFLICT (department_code) DO UPDATE SET department_name = EXCLUDED.department_name`,
-            [row.department_code.trim().toUpperCase(), row.department_name.trim()]
-          );
-          insertedCount++;
-        } else if (tableName === 'students') {
-          const deptId = deptMap.get(row.department_code.trim().toUpperCase());
-          await client.query(
-            `INSERT INTO public.students (register_number, admission_number, first_name, last_name, department_id, email, phone, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (register_number) DO UPDATE
-             SET first_name = EXCLUDED.first_name,
-                 last_name = EXCLUDED.last_name,
-                 department_id = EXCLUDED.department_id,
+            `INSERT INTO public.departments (department_code, department_name, established_year, email, phone)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (department_code) DO UPDATE
+             SET department_name = EXCLUDED.department_name,
+                 established_year = EXCLUDED.established_year,
                  email = EXCLUDED.email,
-                 phone = EXCLUDED.phone,
-                 status = EXCLUDED.status`,
+                 phone = EXCLUDED.phone`,
             [
-              row.register_number.trim(),
-              row.admission_number?.trim() || null,
-              row.first_name.trim(),
-              row.last_name.trim(),
-              deptId,
+              row.department_code.trim().toUpperCase(),
+              row.department_name.trim(),
+              row.established_year ? Number(row.established_year) : null,
               row.email?.trim() || null,
               row.phone?.trim() || null,
-              (row.status?.trim() || 'ACTIVE').toUpperCase(),
             ]
           );
           insertedCount++;
         } else if (tableName === 'faculty') {
           const deptId = deptMap.get(row.department_code.trim().toUpperCase());
           await client.query(
-            `INSERT INTO public.faculty (employee_id, first_name, last_name, designation, department_id, email, phone)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO public.faculty
+               (employee_id, first_name, last_name, department_id, designation, email, phone, date_of_joined)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (employee_id) DO UPDATE
              SET first_name = EXCLUDED.first_name,
                  last_name = EXCLUDED.last_name,
                  designation = EXCLUDED.designation,
                  department_id = EXCLUDED.department_id,
                  email = EXCLUDED.email,
-                 phone = EXCLUDED.phone`,
+                 phone = EXCLUDED.phone,
+                 date_of_joined = EXCLUDED.date_of_joined`,
             [
               row.employee_id.trim(),
               row.first_name.trim(),
               row.last_name.trim(),
-              row.designation.trim(),
               deptId,
-              row.email?.trim() || null,
-              row.phone?.trim() || null,
+              row.designation.trim(),
+              row.email.trim(),
+              row.phone.trim(),
+              row.date_of_joined.trim(),
             ]
           );
           insertedCount++;
         } else if (tableName === 'subjects') {
           const deptId = deptMap.get(row.department_code.trim().toUpperCase());
+          const semesterId = semesterNumberMap.get(Number(row.semester_number));
           await client.query(
-            `INSERT INTO public.subjects (subject_code, subject_name, department_id, credits)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO public.subjects
+               (subject_code, subject_name, department_id, semester_id, credits, subject_type, lecture_hours, practical_hours)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0)
              ON CONFLICT (subject_code) DO UPDATE
              SET subject_name = EXCLUDED.subject_name,
                  department_id = EXCLUDED.department_id,
-                 credits = EXCLUDED.credits`,
+                 semester_id = EXCLUDED.semester_id,
+                 credits = EXCLUDED.credits,
+                 subject_type = EXCLUDED.subject_type`,
             [
               row.subject_code.trim().toUpperCase(),
               row.subject_name.trim(),
               deptId,
-              Number(row.credits || 3.0),
+              semesterId,
+              Number(row.credits),
+              (row.subject_type?.trim() || 'THEORY').toUpperCase(),
             ]
           );
           insertedCount++;
-        } else if (tableName === 'attendance') {
-          const studentId = studentMap.get(row.register_number.trim().toUpperCase());
-          await client.query(
-            `INSERT INTO public.attendance (student_id, attendance_date, status, remarks)
-             VALUES ($1, $2, $3, $4)`,
-            [
-              studentId,
-              row.attendance_date.trim(),
-              row.status.trim().toUpperCase(),
-              row.remarks?.trim() || null,
-            ]
+        } else if (tableName === 'students') {
+          const deptCode = row.department_code.trim().toUpperCase();
+          const deptId = deptMap.get(deptCode);
+          const placement = placementMap.get(
+            `${row.batch_code.trim().toUpperCase()}|${row.section_code.trim().toUpperCase()}`
           );
-          insertedCount++;
-        } else if (tableName === 'student_marks') {
-          const studentId = studentMap.get(row.register_number.trim().toUpperCase());
-          await client.query(
-            `INSERT INTO public.student_marks (student_id, marks_obtained, max_marks, grade)
-             VALUES ($1, $2, $3, $4)`,
-            [
-              studentId,
-              Number(row.marks_obtained),
-              Number(row.max_marks || 100),
-              row.grade?.trim() || null,
-            ]
+          if (!placement) {
+            throw new Error(`No section '${row.section_code}' exists for batch '${row.batch_code}'.`);
+          }
+          // The cohort's current semester is 2 x its year of study.
+          const yearRows = await client.query<{ year_number: number }>(
+            'SELECT year_number FROM public.years_of_study WHERE year_of_study_id = $1',
+            [placement.yearOfStudyId]
           );
-          insertedCount++;
-        } else if (tableName === 'assignments') {
+          const yearNumber = yearRows.rows[0]?.year_number ?? 1;
+          const currentSemesterId = semesterByYearMap.get(yearNumber * 2) ?? null;
+
           await client.query(
-            `INSERT INTO public.assignments (title, description, due_date, max_marks)
-             VALUES ($1, $2, $3, $4)`,
+            `INSERT INTO public.students
+               (register_number, admission_number, first_name, last_name, gender, date_of_birth,
+                department_id, program_id, batch_id, section_id, current_year_of_study_id,
+                current_semester_id, residence_status, email, phone, admission_date, status, address)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             ON CONFLICT (register_number) DO UPDATE
+             SET first_name = EXCLUDED.first_name,
+                 last_name = EXCLUDED.last_name,
+                 gender = EXCLUDED.gender,
+                 department_id = EXCLUDED.department_id,
+                 batch_id = EXCLUDED.batch_id,
+                 section_id = EXCLUDED.section_id,
+                 residence_status = EXCLUDED.residence_status,
+                 email = EXCLUDED.email,
+                 phone = EXCLUDED.phone,
+                 status = EXCLUDED.status,
+                 address = EXCLUDED.address,
+                 updated_at = NOW()`,
             [
-              row.title.trim(),
-              row.description?.trim() || null,
-              row.due_date?.trim() || null,
-              Number(row.max_marks || 100),
-            ]
-          );
-          insertedCount++;
-        } else if (tableName === 'backlogs') {
-          const studentId = studentMap.get(row.register_number.trim().toUpperCase());
-          await client.query(
-            `INSERT INTO public.backlogs (student_id, attempt_count, status)
-             VALUES ($1, $2, $3)`,
-            [
-              studentId,
-              Number(row.attempt_count || 1),
+              row.register_number.trim().toUpperCase(),
+              row.admission_number.trim(),
+              row.first_name.trim(),
+              row.last_name.trim(),
+              row.gender.trim().toUpperCase(),
+              row.date_of_birth.trim(),
+              deptId,
+              placement.programId,
+              placement.batchId,
+              placement.sectionId,
+              placement.yearOfStudyId,
+              currentSemesterId,
+              row.residence_status.trim().toUpperCase(),
+              row.email.trim(),
+              row.phone.trim(),
+              row.admission_date.trim(),
               (row.status?.trim() || 'ACTIVE').toUpperCase(),
+              row.address?.trim() || null,
             ]
           );
           insertedCount++;

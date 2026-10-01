@@ -9,8 +9,10 @@
     "start": "tsx server.ts",
     "clean": "npm --prefix ../frontend run clean",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/core.test.ts",
-    "test:integration": "tsx tests/integration.test.ts"
+    "test": "tsx tests/core.test.ts && tsx tests/providers.test.ts && tsx tests/lmstudio-provider.test.ts && tsx tests/result-interpreter.test.ts && tsx tests/error-messaging.test.ts && tsx tests/narrator-accuracy.test.ts && tsx tests/sql-repair.test.ts && tsx tests/security-models.test.ts",
+    "test:integration": "tsx tests/integration.test.ts",
+    "test:e2e": "tsx tests/e2e-models.test.ts",
+    "test:agent": "tsx tests/conversational-agent.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -45,5 +47,6 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
-  }
+  },
+  "test:agent": "tsx tests/conversational-agent.test.ts"
 }

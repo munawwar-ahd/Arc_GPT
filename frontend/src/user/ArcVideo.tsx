@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-const ARC_LOGO_SRC = '/arc/arc-logo-spin.mp4';
+const ARC_LOGO_SRC = `${import.meta.env.BASE_URL}arc/arc-logo-spin.mp4`;
 
 interface ArcVideoProps {
   className?: string;

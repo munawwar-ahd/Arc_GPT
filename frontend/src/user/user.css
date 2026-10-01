@@ -1072,7 +1072,185 @@ h6.arc-markdown-heading {
   transition: right 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* The model selector's landing-screen placement: immediately left of the
+   floating history toggle, which is anchored 60px in from the rail and is 30px
+   wide, plus a 10px gap. The identical `right` transition means both controls
+   slide together when the sidebar opens, instead of one passing through the
+   other. */
+.arc-model-float {
+  position: absolute;
+  top: clamp(20px, 4vh, 34px);
+  z-index: 2;
+  right: calc(100px + clamp(20px, 3vw, 40px));
+  transition: right 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
 
+/* ============================================================
+   Model selector.
+
+   Built from the same tokens as the export control it sits beside: hairline
+   border, muted label, gold reserved for the selected entry and for focus. The
+   menu is the same black panel with a backdrop blur, so it reads as sitting
+   over the animated conversation backdrop rather than inside it.
+
+   The wider menu is deliberate. Each entry has to carry the model name, the
+   server it is served by and the resolved model id, and an unavailable engine
+   has to be able to explain itself on one line — a 246px menu truncates all
+   three.
+   ============================================================ */
+
+.arc-model {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.arc-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px 7px 11px;
+  border: 1px solid var(--arc-line);
+  border-radius: 9px;
+  color: var(--arc-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  transition: color 200ms ease, border-color 200ms ease, background 200ms ease;
+}
+
+.arc-model-trigger:hover:not(:disabled) {
+  border-color: rgba(224, 190, 112, 0.42);
+  color: var(--arc-ink);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.arc-model-trigger[aria-expanded='true'] {
+  border-color: rgba(224, 190, 112, 0.42);
+  color: var(--arc-ink);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* The model name is the one part of the trigger that may be long — LM Studio
+   reports repository-style slugs — so it is the only element allowed to
+   truncate. */
+.arc-model-trigger-label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arc-model-caret {
+  transition: transform 200ms ease;
+}
+
+.arc-model-trigger[aria-expanded='true'] .arc-model-caret {
+  transform: rotate(180deg);
+}
+
+.arc-model-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.arc-model-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
+  width: 296px;
+  padding: 5px;
+  border: 1px solid var(--arc-line-strong);
+  border-radius: 12px;
+  background: rgba(6, 6, 8, 0.92);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(18px);
+  animation: arc-export-menu-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.arc-model-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--arc-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.arc-model-item:hover:not(:disabled),
+.arc-model-item:focus-visible {
+  color: var(--arc-ink);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.arc-model-item[aria-checked='true'] {
+  color: var(--arc-ink);
+}
+
+/* An engine that is not running stays visible — the user needs to know the
+   option exists — but cannot be chosen. */
+.arc-model-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.arc-model-item:disabled .arc-model-item-hint {
+  color: var(--arc-danger);
+}
+
+.arc-model-item-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(224, 190, 112, 0.22);
+  border-radius: 7px;
+  color: var(--arc-accent);
+  background: var(--arc-accent-soft);
+}
+
+.arc-model-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.arc-model-item-label {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.arc-model-item-hint {
+  color: var(--arc-faint);
+  font-size: 10.5px;
+  line-height: 1.35;
+  /* The hint carries the provider name and the resolved model id, which is the
+     diagnostic when a request fails; wrapping is preferable to truncating it. */
+  overflow-wrap: anywhere;
+}
+
+.arc-model-item:hover .arc-model-item-hint,
+.arc-model-item:focus-visible .arc-model-item-hint {
+  color: var(--arc-muted);
+}
+
+.arc-model-trigger:focus-visible,
+.arc-model-item:focus-visible {
+  outline: 1px solid rgba(224, 190, 112, 0.55);
+  outline-offset: 2px;
+}
 
 .arc-history-toggle:focus-visible,
 .arc-thread-new:focus-visible,
