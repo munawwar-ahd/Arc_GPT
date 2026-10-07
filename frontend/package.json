@@ -10,7 +10,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "build:pages": "vite build --base /Arc_GPT/",
-    "deploy": "npm run build:pages && gh-pages -d dist"
+    "publish:pages": "gh-pages -d dist",
+    "deploy": "npm run build:pages && npm run publish:pages"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
