@@ -44,6 +44,13 @@ set "LM_STATE=UNAVAILABLE"
 set "TUNNEL_URL="
 set "TUNNEL_MODE=NONE"
 
+rem PIDs of the windows THIS launcher opened. Only these may ever be stopped:
+rem a backend or tunnel that was already running belongs to an earlier session
+rem and is none of this launcher's business.
+set "STARTED_BACKEND_PID="
+set "STARTED_TUNNEL_PID="
+set "BACKEND_REUSED=0"
+
 rem A fresh log per run. cloudflared holds its log file open for the life of the
 rem tunnel, so a reused path would append this run onto the previous run's and
 rem the URL scan would find the older, dead tunnel first.
@@ -154,15 +161,91 @@ rem The port is checked first so an already-running ArcGPT is never duplicated.
 rem Readiness is decided by GET /api/health below, not by the port: the port
 rem opens while PostgreSQL is still connecting and the model providers are
 rem still being probed.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-Object Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1', %API_PORT%); exit 0 } catch { exit 1 } finally { $c.Close() }"
-if errorlevel 1 (
-    echo   Port %API_PORT% is free. Starting ArcGPT-Backend...
-    echo   Command : npm run dev     ^(tsx server.ts, in %BACKEND%^)
-    start "ArcGPT Backend" cmd /k "cd /d ""%BACKEND%"" && npm run dev"
-) else (
-    echo   Port %API_PORT% is already in use. Not starting a second backend.
-    echo   If that is not ArcGPT, close it first.
+rem
+rem An open port on its own says nothing. Something else could hold 3000, and
+rem so could a perfectly healthy ArcGPT started minutes ago. So the port is
+rem asked who is there, and /api/health is asked whether that someone is us.
+rem
+rem Each answer is read straight into one variable with `set /p`. There is
+rem deliberately no `for /f` here: a parenthesised for loop left cmd unable to
+rem find the labels that follow it, so every goto after it failed with
+rem "cannot find the batch label". Two small probes cost one extra PowerShell
+rem start and remove that whole class of failure.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-Object Net.Sockets.TcpClient; $open = $false; try { $c.Connect('127.0.0.1', %API_PORT%); $open = $true } catch { } finally { $c.Close() }; if (-not $open) { Write-Output 'FREE'; exit 0 }; try { $h = Invoke-RestMethod -Uri '%API_URL%/api/health' -TimeoutSec 8; if ($h.server -eq 'ok') { Write-Output 'ARCGPT'; exit 0 } } catch { }; Write-Output 'FOREIGN'" > "%TEMP%\arcgpt-verdict.txt"
+set "PORT_VERDICT=UNKNOWN"
+set /p PORT_VERDICT=<"%TEMP%\arcgpt-verdict.txt"
+del /q "%TEMP%\arcgpt-verdict.txt" 2>nul
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetTCPConnection -State Listen -LocalPort %API_PORT% -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess" > "%TEMP%\arcgpt-ownerpid.txt"
+set "PORT_PID="
+set /p PORT_PID=<"%TEMP%\arcgpt-ownerpid.txt"
+del /q "%TEMP%\arcgpt-ownerpid.txt" 2>nul
+
+if "%PORT_VERDICT%"=="FREE" goto startbackend
+if "%PORT_VERDICT%"=="ARCGPT" goto reusebackend
+if "%PORT_VERDICT%"=="FOREIGN" goto foreignport
+goto portunknown
+
+rem --- the probe itself did not produce a verdict: say so, guess nothing -------
+:portunknown
+echo.
+echo [ERROR] Could not determine what is using port %API_PORT%.
+echo         The port probe returned: "%PORT_VERDICT%"
+echo.
+echo         This launcher will not guess. Check the port yourself with:
+echo             netstat -ano ^| findstr :%API_PORT%
+echo.
+pause
+exit /b 1
+
+rem --- an ArcGPT backend is already up: reuse it, do not start a second one ---
+
+:reusebackend
+echo   An ArcGPT backend is ALREADY RUNNING on port %API_PORT%.
+echo   Reusing it. No second backend was started.
+if defined PORT_PID echo   Backend pid : %PORT_PID%
+echo.
+echo   Its console window is still open and still showing the backend log.
+echo   No new window was created, so use Alt+Tab or the taskbar to find it -
+echo   it is most likely behind this one.
+set "BACKEND_REUSED=1"
+goto backenddecided
+
+rem --- something that is not ArcGPT owns the port: refuse, do not fight it ----
+:foreignport
+echo.
+echo [ERROR] Port %API_PORT% is owned by another program, not ArcGPT.
+echo         Owning process id : %PORT_PID%
+echo         Find it with:  netstat -ano ^| findstr :%API_PORT%
+echo.
+echo         ArcGPT was not started, because it could not bind the port.
+echo         Close that program, then run this launcher again.
+echo.
+pause
+exit /b 1
+
+rem --- port is free: start the backend and remember what we opened ------------
+:startbackend
+echo   Port %API_PORT% is free. Starting ArcGPT-Backend...
+echo   Command : npm run dev     ^(tsx server.ts, in %BACKEND%^)
+rem Start-Process is used instead of `start` so the window's pid comes back.
+rem It becomes the handle used to stop exactly this backend later. The title is
+rem set from inside so the window can be recognised on screen, and the working
+rem directory is a property of the process, so no path quoting is needed.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/k title ArcGPT Backend && npm run dev' -WorkingDirectory '%BACKEND%' -PassThru; Write-Output $p.Id" > "%TEMP%\arcgpt-backendpid.txt"
+set "STARTED_BACKEND_PID="
+set /p STARTED_BACKEND_PID=<"%TEMP%\arcgpt-backendpid.txt"
+del /q "%TEMP%\arcgpt-backendpid.txt" 2>nul
+if not defined STARTED_BACKEND_PID (
+    echo   Could not start the backend. Read the error above.
+    echo.
+    pause
+    exit /b 1
 )
+echo   Backend window pid : %STARTED_BACKEND_PID%
+set "BACKEND_REUSED=0"
+
+:backenddecided
 echo.
 
 rem ============================================================================
@@ -220,7 +303,21 @@ echo   Command     : cloudflared tunnel --url %API_URL%
 rem The tunnel runs in its own cmd /k window. That window gives cloudflared a
 rem real console, which it requires: with stdin redirected it prints "Input
 rem redirection is not supported" and writes the error into this launcher.
-start "ArcGPT Tunnel" cmd /k ""%CLOUDFLARED%" tunnel --url %API_URL% --logfile "%TUNNEL_LOG%""
+rem Start-Process is used so the window's pid comes back and this launcher can
+rem later stop exactly the tunnel it opened, and nothing else. The quotes
+rem around the two paths are built from [char]34 so that no literal double
+rem quote has to survive cmd's own parsing of this line.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$q = [char]34; $arg = '/k title ArcGPT Tunnel && ' + $q + '%CLOUDFLARED%' + $q + ' tunnel --url %API_URL% --logfile ' + $q + '%TUNNEL_LOG%' + $q; $p = Start-Process -FilePath 'cmd.exe' -ArgumentList $arg -WorkingDirectory '%FRONTEND%' -PassThru; Write-Output $p.Id" > "%TEMP%\arcgpt-tunnelpid.txt"
+set "STARTED_TUNNEL_PID="
+set /p STARTED_TUNNEL_PID=<"%TEMP%\arcgpt-tunnelpid.txt"
+del /q "%TEMP%\arcgpt-tunnelpid.txt" 2>nul
+if not defined STARTED_TUNNEL_PID (
+    echo   Could not start cloudflared. Nothing was published.
+    echo.
+    pause
+    exit /b 1
+)
+echo   Tunnel window pid  : %STARTED_TUNNEL_PID%
 
 echo   Waiting for the public URL ...
 for /l %%I in (1,1,30) do call :pollurl
@@ -257,14 +354,60 @@ echo.
 echo Public Tunnel:
 echo     %TUNNEL_URL%
 echo.
-echo Windows:
-echo     "ArcGPT Backend"  backend log - close it to stop ArcGPT
-echo     "ArcGPT Tunnel"   tunnel log  - close it to stop sharing
+if "%BACKEND_REUSED%"=="1" (
+    echo Windows:
+    if defined PORT_PID echo     backend window already open ^(pid %PORT_PID%^) - Alt+Tab to it
+    if defined STARTED_TUNNEL_PID echo     tunnel window started here ^(pid %STARTED_TUNNEL_PID%^) - close it to stop sharing
+) else (
+    echo Windows:
+    if defined STARTED_BACKEND_PID echo     backend window started here ^(pid %STARTED_BACKEND_PID%^) - close it to stop ArcGPT
+    if defined STARTED_TUNNEL_PID echo     tunnel window started here ^(pid %STARTED_TUNNEL_PID%^) - close it to stop sharing
+)
 echo.
 echo The tunnel URL changes every time the Quick Tunnel restarts.
+echo.
+call :offershutdown
+echo.
 echo This launcher is finished. Close it when you no longer need it.
 echo.
 pause
+exit /b 0
+
+rem ============================================================================
+rem  Shutdown offer.
+rem
+rem  Only the windows this launcher opened are ever offered. A backend or
+rem  tunnel that was already running when this launcher started belongs to an
+rem  earlier session and is deliberately left alone, however tempting it looks:
+rem  stopping someone else's server is not this script's decision to make.
+rem
+rem  This is an offer, never automatic. Closing this launcher window must not
+rem  kill the backend - that is exactly the surprise this replaces.
+rem ============================================================================
+:offershutdown
+if not defined STARTED_BACKEND_PID if not defined STARTED_TUNNEL_PID exit /b 0
+echo ========================================
+echo          SHUTDOWN
+echo ========================================
+echo.
+echo Started by THIS launcher:
+if defined STARTED_BACKEND_PID echo     backend : window pid %STARTED_BACKEND_PID%
+if defined STARTED_TUNNEL_PID echo     tunnel  : window pid %STARTED_TUNNEL_PID%
+if "%BACKEND_REUSED%"=="1" echo     backend : NOT started here, left untouched
+echo.
+echo Closing this window does NOT stop them.
+choice /c YN /n /m "Stop the above now? [Y/N] "
+if errorlevel 2 exit /b 0
+if defined STARTED_BACKEND_PID call :stoptree "%STARTED_BACKEND_PID%"
+if defined STARTED_TUNNEL_PID call :stoptree "%STARTED_TUNNEL_PID%"
+echo.
+echo Stopped.
+exit /b 0
+
+rem --- taskkill /T ends a window and everything it spawned, which for these two
+rem --- is exactly the server and its children, and nothing else.
+:stoptree
+taskkill /PID %~1 /T /F
 exit /b 0
 
 rem ============================================================================
@@ -312,11 +455,12 @@ exit /b 1
 echo [ERROR] The ArcGPT backend did not become ready.
 echo         %API_URL%/api/health did not report server=ok within 120 seconds.
 echo         Read the "ArcGPT Backend" window for the actual error. Common
-echo         causes: backend\.env missing or wrong, port %API_PORT% taken by
-echo         another program, or node_modules not installed.
+echo         causes: backend\.env missing or wrong, or node_modules not
+echo         installed.
+if defined STARTED_BACKEND_PID echo         This launcher started it, window pid %STARTED_BACKEND_PID%.
+if "%BACKEND_REUSED%"=="1" echo         It was already running (pid %PORT_PID%), so the launcher did not start it.
 echo.
-echo         Note: a %API_PORT% that was already in use was left alone, so an
-echo         unrelated process there is also a possible cause.
+call :offershutdown
 echo.
 pause
 exit /b 1
@@ -324,6 +468,8 @@ exit /b 1
 :nocf
 echo [WARNING] cloudflared.exe was not found, so no public tunnel was opened.
 echo           ArcGPT is running normally at %API_URL%.
+echo.
+call :offershutdown
 echo.
 pause
 exit /b 0
@@ -333,6 +479,9 @@ echo [ERROR] cloudflared did not publish a URL.
 echo         The tunnel log is: %TUNNEL_LOG%
 echo         Read the "ArcGPT Tunnel" window for the actual error. ArcGPT is
 echo         still running at %API_URL%; only the public URL is missing.
+if defined STARTED_TUNNEL_PID echo         This launcher started it, window pid %STARTED_TUNNEL_PID%.
+echo.
+call :offershutdown
 echo.
 pause
 exit /b 1
