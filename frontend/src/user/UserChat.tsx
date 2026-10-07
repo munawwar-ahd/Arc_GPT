@@ -274,8 +274,8 @@ function ChatComposer({
         <SendButton disabled={isLoading || !value.trim()} />
       </div>
       <div className="arc-composer-caption" aria-hidden="true">
-        <span>Dr. Srinivasan Alavandar</span>
-        <span>Principal Access</span>
+        <span>Dev - Munawwar Ahmed</span>
+        <span>Public Access</span>
       </div>
     </form>
   );
