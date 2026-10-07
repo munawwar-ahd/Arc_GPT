@@ -70,10 +70,10 @@ echo.
 
 rem --- tunnel ----------------------------------------------------------------
 echo Starting Cloudflare quick tunnel to http://localhost:%API_PORT% ...
-rem cloudflared refuses to run when its stdin is not a terminal. Without NUL fed
-rem to it, it prints "Input redirection is not supported" and exits without ever
-rem opening the tunnel.
-start "ArcGPT Tunnel" cmd /k ""%CLOUDFLARED%" tunnel --url http://localhost:%API_PORT% --logfile "%TUNNEL_LOG%" <nul"
+rem The tunnel runs in its own cmd /k window, which gives cloudflared the console
+rem it requires. Redirecting stdin here instead makes it print "Input
+rem redirection is not supported" into this launcher.
+start "ArcGPT Tunnel" cmd /k ""%CLOUDFLARED%" tunnel --url http://localhost:%API_PORT% --logfile "%TUNNEL_LOG%""
 
 echo Waiting for the tunnel to publish a URL ...
 set "TUNNEL_URL="
