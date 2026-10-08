@@ -251,9 +251,14 @@ echo [8/8] Verify the LIVE GitHub Pages bundle
 echo ============================================================================
 rem A correct local build proves nothing about the live site. The asset GitHub
 rem Pages actually serves, its contents, and the tunnel that asset names are all
-rem re-read here. Pages can take a moment to serve a new commit, so this is
-rem retried rather than trusted on the first attempt.
-for /l %%I in (1,1,10) do call :livecheck %%I
+rem re-read here. Pages can take a while to serve a new commit - a few minutes
+rem was observed in practice - so this is retried generously rather than trusted
+rem on the first attempt. 20 attempts 15 seconds apart is about five minutes.
+rem
+rem Only the budget changed. What counts as correct has not: the same live HTML,
+rem the same asset it names, the same current-URL-present / dead-URL-absent and
+rem tunnel-health checks, all unchanged.
+for /l %%I in (1,1,20) do call :livecheck %%I
 if not defined LIVE_OK goto livefail
 
 :deployok
@@ -306,8 +311,8 @@ del /q "%TEMP%\arcgpt-deploy-ln.txt" 2>nul
 find "LIVE=1" "%LV_RESULT%" >nul && set "LIVE_OK=1"
 if defined LIVE_OK exit /b 0
 
-echo         attempt %~1 of 10 : %LIVE_NOTE%
-timeout /t 10 /nobreak >nul
+echo         attempt %~1 of 20 : %LIVE_NOTE%
+timeout /t 15 /nobreak >nul
 exit /b 0
 
 rem ============================================================================
