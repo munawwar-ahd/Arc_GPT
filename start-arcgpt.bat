@@ -45,6 +45,7 @@ set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "BACKEND=%ROOT%\backend"
 set "FRONTEND=%ROOT%\frontend"
+set "DEPLOY_SCRIPT=%ROOT%\Deploy-ArcGPT-Pages.bat"
 
 set "API_URL=http://localhost:3000"
 set "API_PORT=3000"
@@ -358,6 +359,19 @@ echo   Tunnel window pid  : %STARTED_TUNNEL_PID%
 echo   Waiting for the public URL ...
 for /l %%I in (1,1,30) do call :pollurl
 if not defined TUNNEL_URL goto tunnelfail
+
+rem cloudflared prints its hostname BEFORE that hostname resolves. A quick
+rem tunnel normally becomes reachable a few seconds later, but not instantly,
+rem and anything that asks it a question in between is told the name does not
+rem exist. The old workflow hid this: the deploy was run by hand, minutes
+rem later, long after DNS had settled. Deploying from here immediately would
+rem hit that window every single time, so the launcher now waits until the
+rem tunnel actually answers before treating it as ready.
+echo   Waiting for the tunnel to answer ...
+set "TUNNEL_LIVE="
+for /l %%I in (1,1,30) do call :waitfortunnel
+if not defined TUNNEL_LIVE goto tunnelnotready
+
 set "TUNNEL_MODE=NEW"
 goto tunneldone
 
@@ -438,14 +452,132 @@ echo.
 echo This is the one tunnel for this session. Deploy-ArcGPT-Pages.bat reuses
 echo it, so a GitHub Pages deploy will publish exactly this URL.
 echo.
-echo The tunnel URL changes every time the Quick Tunnel restarts. If it does,
-echo run Deploy-ArcGPT-Pages.bat again to republish with the new one.
+
+rem ============================================================================
+rem  Auto-deploy, but only when the tunnel actually rotated.
+rem
+rem  A Quick Tunnel hostname is random per creation. When this launcher had to
+rem  open a new one, the hostname that is baked into the published bundle is
+rem  already dead, and the hosted site is broken until Pages is republished. So
+rem  a NEW tunnel triggers exactly one deployment, right here.
+rem
+rem  An EXISTING tunnel changes nothing: what is published is already correct,
+rem  and redeploying on every launch would be noise.
+rem
+rem  This MUST run before :offershutdown. That prompt can taskkill the tunnel
+rem  this launcher owns, and publishing after that would bake a dead hostname
+rem  into the live site - the exact bug this arrangement exists to prevent.
+rem
+rem  It is a plain `if` on a single line calling a subroutine, deliberately not
+rem  a parenthesised block: this launcher has a documented history of cmd losing
+rem  the labels that follow one.
+rem ============================================================================
+if "%TUNNEL_MODE%"=="NEW" call :autodeploy
+
 echo.
 call :offershutdown
 echo.
 echo This launcher is finished. Close it when you no longer need it.
 echo.
 pause
+exit /b 0
+
+rem ============================================================================
+rem  waitfortunnel - one attempt at asking the new tunnel whether it works
+rem
+rem  Asks ArcGPT-Tunnel.ps1, which applies the same rule as everywhere else:
+rem  server=ok, database=arcgpt_new and ollama=ok. "cloudflared printed a URL"
+rem  is not evidence the URL works, and publishing one that does not is the
+rem  failure this whole arrangement exists to prevent.
+rem ============================================================================
+:waitfortunnel
+if defined TUNNEL_LIVE exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TUNNEL_HELPER%" -Action Validate -Url "%TUNNEL_URL%" -ExpectedDb "%EXPECTED_DB%" > "%TEMP%\arcgpt-tunnel-live.txt" 2>nul
+findstr /c:"ARCGPT_TUNNEL_VALID=1" "%TEMP%\arcgpt-tunnel-live.txt" >nul 2>&1 && set "TUNNEL_LIVE=1"
+del /q "%TEMP%\arcgpt-tunnel-live.txt" 2>nul
+if defined TUNNEL_LIVE exit /b 0
+timeout /t 3 /nobreak >nul
+exit /b 0
+
+rem ============================================================================
+rem  autodeploy - republish GitHub Pages, but only for a freshly created tunnel
+rem
+rem  Reached only when TUNNEL_MODE is NEW, so this runs once per launcher run
+rem  that opened a tunnel, and never on a plain restart.
+rem
+rem  The tunnel is NOT passed in and NOT recreated here. The state file was
+rem  already written at :tunneldone, so Deploy-ArcGPT-Pages.bat resolves this
+rem  same tunnel through ArcGPT-Tunnel.ps1, reuses it, and bakes exactly this
+rem  URL into the bundle. Opening a tunnel in this launcher is the only place
+rem  one is ever created, which is what keeps the count at one.
+rem
+rem  A deployment failure is reported loudly and then swallowed. ArcGPT itself
+rem  is already running and healthy at this point, so failing here must never
+rem  take the backend or the tunnel down with it, and must never turn a working
+rem  local start into a fatal error. What the user has to be told is the
+rem  important part: Pages may still be serving the previous, dead hostname.
+rem ============================================================================
+:autodeploy
+if not exist "%DEPLOY_SCRIPT%" goto autodeployfailed
+
+echo ========================================
+echo     NEW TUNNEL - REPUBLISHING PAGES
+echo ========================================
+echo.
+echo   A new Cloudflare Quick Tunnel was created:
+echo       %TUNNEL_URL%
+echo.
+echo   Quick Tunnel hostnames are random and change every time the tunnel
+echo   restarts. The copy of that hostname baked into the published GitHub
+echo   Pages bundle belongs to the previous tunnel and no longer answers, so
+echo   the hosted site has to be republished with the new URL before it works
+echo   again.
+echo.
+echo   Deploying now. This builds the frontend, publishes to gh-pages and
+echo   then checks the live site, and can take a minute or two. Please wait.
+echo.
+
+call "%DEPLOY_SCRIPT%"
+
+set "DEPLOY_EXIT=%ERRORLEVEL%"
+rem The deploy script sets its own window title; put this launcher's back.
+title ArcGPT Local
+if not "%DEPLOY_EXIT%"=="0" goto autodeployfailed
+
+echo.
+echo ========================================
+echo     GITHUB PAGES REPUBLISHED
+echo ========================================
+echo.
+echo   Pages now publishes this tunnel:
+echo       %TUNNEL_URL%
+echo.
+echo   The hosted site and the tunnel running here are the same tunnel now.
+exit /b 0
+
+rem ============================================================================
+rem  deployment failed - loud, but nothing local is touched
+rem ============================================================================
+:autodeployfailed
+echo.
+echo ========================================
+echo   [WARNING] GITHUB PAGES WAS NOT UPDATED
+echo ========================================
+echo.
+echo   Publishing failed. The detail is in the output above.
+echo.
+echo   What is still fine:
+echo       the ArcGPT backend on %API_URL%
+echo       the tunnel at %TUNNEL_URL%
+echo   Both are running and were left running on purpose.
+echo.
+echo   What is not fine:
+echo       https://munawwar-ahd.github.io/Arc_GPT/ may still point at the
+echo       PREVIOUS tunnel, whose hostname no longer answers.
+echo.
+echo   Nothing was killed to get here. Re-run this script, or run
+echo   Deploy-ArcGPT-Pages.bat yourself, to publish the new tunnel.
+echo.
 exit /b 0
 
 rem ============================================================================
@@ -572,6 +704,28 @@ echo         still running at %API_URL%; only the public URL is missing.
 if defined STARTED_TUNNEL_PID echo         This launcher started it, window pid %STARTED_TUNNEL_PID%.
 echo.
 call :offershutdown
+echo.
+pause
+exit /b 1
+
+rem The tunnel exists but will not answer, so nothing was published: a hostname
+rem that cannot serve requests is worse than no hostname at all, because the
+rem hosted site would look fine and fail for every visitor. The tunnel process
+rem is deliberately left running rather than killed, because this launcher did
+rem not verify it is the only ArcGPT tunnel and must not guess.
+:tunnelnotready
+echo [ERROR] The new tunnel published a URL but never answered.
+echo.
+echo         URL   : %TUNNEL_URL%
+echo         Log   : %TUNNEL_LOG%
+echo.
+echo         A Quick Tunnel hostname does not resolve the instant cloudflared
+echo         prints it, and this one still did not answer /api/health after
+echo         waiting. Nothing was built and nothing was published, so GitHub
+echo         Pages still shows the previous tunnel rather than this dead one.
+echo.
+echo         ArcGPT is still running at %API_URL%, and the tunnel window was
+echo         left alone. Wait a moment and run this again.
 echo.
 pause
 exit /b 1
