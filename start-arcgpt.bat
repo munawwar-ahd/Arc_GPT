@@ -20,9 +20,25 @@ rem                   frontend itself through Vite middleware, so this is the
 rem                   whole application. No second web server is started.
 rem    Cloudflare   Quick Tunnel to port 3000, for demo sharing only.
 rem
-rem  It changes no database, no environment file and no application source. It
-rem  installs nothing and downloads no model. It never kills a process it did
-rem  not start.
+rem Shared tunnel
+rem --------------
+rem There is exactly ONE authoritative ArcGPT Quick Tunnel per running session,
+rem and this launcher owns it. The tunnel URL is ephemeral, so it is always
+rem discovered, never hard-coded: a healthy one is reused, and exactly one is
+rem opened when none exists.
+rem
+rem The resolved URL is recorded in %TEMP%\arcgpt-tunnel-state.txt, and
+rem Deploy-ArcGPT-Pages.bat reads it from there. That file is the whole point:
+rem the hosted GitHub Pages bundle must name the tunnel that is actually
+rem running, not a second one the deploy script happened to open. Both scripts
+rem go through ArcGPT-Tunnel.ps1 so neither can drift.
+rem
+rem The state file is temporary and is never committed. It holds a hostname
+rem and two pids, and no credential.
+rem
+rem It changes no database, no environment file and no application source. It
+rem installs nothing and downloads no model. It never kills a process it did
+rem not start.
 rem ============================================================================
 
 set "ROOT=%~dp0"
@@ -274,6 +290,16 @@ echo.
 rem ============================================================================
 echo [6/6] Cloudflare Quick Tunnel
 rem ============================================================================
+rem This is the ONE authoritative ArcGPT tunnel for the session. Both this
+rem launcher and Deploy-ArcGPT-Pages.bat resolve it through ArcGPT-Tunnel.ps1,
+rem so the hosted GitHub Pages bundle can never end up pointing at a different
+rem tunnel than the one actually running.
+rem
+rem A tunnel is reused whenever a healthy one is found, and exactly one is
+rem opened when none exists. See "Shared tunnel" in the header above.
+set "TUNNEL_HELPER=%ROOT%\ArcGPT-Tunnel.ps1"
+set "RESOLVE_REPORT=%TEMP%\arcgpt-tunnel-resolve.txt"
+
 set "CLOUDFLARED="
 for %%P in (
     "%ProgramFiles%\cloudflared\cloudflared.exe"
@@ -285,18 +311,28 @@ for %%P in (
 
 if not defined CLOUDFLARED goto nocf
 
+if not exist "%TUNNEL_HELPER%" (
+    echo.
+    echo [ERROR] %TUNNEL_HELPER% was not found.
+    echo         This file resolves the shared ArcGPT tunnel. Keep it next to
+    echo         this launcher.
+    echo.
+    pause
+    exit /b 1
+)
+
 rem Reuse a tunnel that is already alive rather than opening a second one.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = @(Get-ChildItem -LiteralPath $env:TEMP -Filter 'arcgpt-tunnel-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending); foreach ($x in $f) { $t = Get-Content -Raw -LiteralPath $x.FullName -ErrorAction SilentlyContinue; if (-not $t) { continue }; $m = [regex]::Match($t, 'https://[a-zA-Z0-9-]+\.trycloudflare\.com'); if (-not $m.Success) { continue }; try { $h = Invoke-RestMethod -Uri ($m.Value + '/api/health') -TimeoutSec 8; if ($h.server -eq 'ok') { Write-Output $m.Value; exit 0 } } catch { } }; exit 1" > "%TEMP%\arcgpt-tunnel-find.txt"
-set "FIND_EXIT=%ERRORLEVEL%"
+rem ArcGPT-Tunnel.ps1 asks the state file and then every tunnel log, newest
+rem first, and returns the first URL whose /api/health answers server=ok,
+rem database=arcgpt_new and ollama=ok. It prints the bare URL, or an empty
+rem line, so it is read with a plain `set /p` and no for /f.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TUNNEL_HELPER%" -Action Resolve -ExpectedDb "%EXPECTED_DB%" -Report "%RESOLVE_REPORT%" > "%TEMP%\arcgpt-tunnel-find.txt"
+set "FOUND_URL="
 set /p FOUND_URL=<"%TEMP%\arcgpt-tunnel-find.txt"
 del /q "%TEMP%\arcgpt-tunnel-find.txt" 2>nul
 
-if "%FIND_EXIT%"=="0" (
-    set "TUNNEL_URL=%FOUND_URL%"
-    set "TUNNEL_MODE=EXISTING"
-    echo   A tunnel is already running and answering. Reusing it.
-    goto tunneldone
-)
+call :showresolve
+if not "%FOUND_URL%"=="" goto tunnelreuse
 
 echo   cloudflared : %CLOUDFLARED%
 echo   Command     : cloudflared tunnel --url %API_URL%
@@ -325,7 +361,41 @@ if not defined TUNNEL_URL goto tunnelfail
 set "TUNNEL_MODE=NEW"
 goto tunneldone
 
+:tunnelreuse
+set "TUNNEL_URL=%FOUND_URL%"
+set "TUNNEL_MODE=EXISTING"
+echo   A healthy ArcGPT tunnel is already running. Reusing it.
+echo   No second tunnel was opened.
+goto tunneldone
+
 :tunneldone
+rem ---------------------------------------------------------------------------
+rem Record the session's tunnel where the deploy script can find it. The file
+rem lives in %TEMP% and is never committed: it holds a hostname and two pids,
+rem no credential of any kind.
+rem
+rem OWNED is informational. Shutdown safety does NOT read it: only
+rem STARTED_TUNNEL_PID, which is set above and only when THIS launcher opened
+rem the tunnel, decides what may be stopped. A tunnel found by the resolve step
+rem therefore stays recorded as OWNED=0 and is left alone at shutdown.
+rem ---------------------------------------------------------------------------
+set "TUNNEL_OWNED=0"
+set "RECORDED_TUNNEL_PID="
+if "%TUNNEL_MODE%"=="NEW" (
+    set "TUNNEL_OWNED=1"
+    set "RECORDED_TUNNEL_PID=%STARTED_TUNNEL_PID%"
+)
+
+rem PORT_PID is only set when the port was already owned when this launcher
+rem started. When this launcher opened the backend, STARTED_BACKEND_PID is the
+rem real one, so record whichever applies.
+set "RECORDED_BACKEND_PID=%PORT_PID%"
+if not defined RECORDED_BACKEND_PID set "RECORDED_BACKEND_PID=%STARTED_BACKEND_PID%"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TUNNEL_HELPER%" -Action Record -Url "%TUNNEL_URL%" -TunnelPid "%RECORDED_TUNNEL_PID%" -BackendPid "%RECORDED_BACKEND_PID%" -Owned "%TUNNEL_OWNED%" -Log "%TUNNEL_LOG%" > "%TEMP%\arcgpt-tunnel-record.txt" 2>nul
+del /q "%TEMP%\arcgpt-tunnel-record.txt" 2>nul
+echo   Recorded in : %TEMP%\arcgpt-tunnel-state.txt
+echo   Deploy-ArcGPT-Pages.bat will reuse this same tunnel.
 echo.
 echo ========================================
 echo            ARC GPT READY
@@ -353,6 +423,7 @@ if "%LM_STATE%"=="UNAVAILABLE" (
 echo.
 echo Public Tunnel:
 echo     %TUNNEL_URL%
+echo     mode : %TUNNEL_MODE%
 echo.
 if "%BACKEND_REUSED%"=="1" (
     echo Windows:
@@ -364,7 +435,11 @@ if "%BACKEND_REUSED%"=="1" (
     if defined STARTED_TUNNEL_PID echo     tunnel window started here ^(pid %STARTED_TUNNEL_PID%^) - close it to stop sharing
 )
 echo.
-echo The tunnel URL changes every time the Quick Tunnel restarts.
+echo This is the one tunnel for this session. Deploy-ArcGPT-Pages.bat reuses
+echo it, so a GitHub Pages deploy will publish exactly this URL.
+echo.
+echo The tunnel URL changes every time the Quick Tunnel restarts. If it does,
+echo run Deploy-ArcGPT-Pages.bat again to republish with the new one.
 echo.
 call :offershutdown
 echo.
@@ -408,6 +483,21 @@ rem --- taskkill /T ends a window and everything it spawned, which for these two
 rem --- is exactly the server and its children, and nothing else.
 :stoptree
 taskkill /PID %~1 /T /F
+exit /b 0
+
+rem ============================================================================
+rem  showresolve - print the tunnel candidates the helper rejected, if any.
+rem
+rem  Kept in its own label rather than inline. This launcher has a documented
+rem  history of cmd losing the labels after a parenthesised block, and a
+rem  for /f inside parentheses is exactly what did it.
+rem ============================================================================
+:showresolve
+if not exist "%RESOLVE_REPORT%" exit /b 0
+echo   Candidates checked:
+for /f "tokens=*" %%L in ('type "%RESOLVE_REPORT%"') do echo     %%L
+del /q "%RESOLVE_REPORT%" 2>nul
+echo.
 exit /b 0
 
 rem ============================================================================
